@@ -1,0 +1,1261 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>NEON-REAP: BIO-CONTAINMENT</title>
+    <style>
+        body {
+            background: #050505;
+            color: #0f0;
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        canvas {
+            border: 4px solid #222;
+            box-shadow: 0 0 20px #0f04;
+            background: #000;
+            cursor: crosshair;
+        }
+
+        #ui {
+            position: absolute;
+            bottom: 20px;
+            width: 640px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 22px;
+            text-shadow: 2px 2px #000;
+            pointer-events: none;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            background: rgba(0, 0, 0, 0.95);
+            padding: 50px;
+            border: 4px solid #0f0;
+            z-index: 100;
+        }
+
+        button {
+            background: #0f0;
+            border: none;
+            padding: 15px 30px;
+            font-family: inherit;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 20px;
+        }
+
+        button:hover {
+            background: #fff;
+        }
+
+        #transitionOverlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            background: rgba(0, 0, 0, 0.9);
+            padding: 40px;
+            border: 4px solid #0cf;
+            box-shadow: 0 0 20px #0cf4;
+            color: #0cf;
+            font-family: inherit;
+            z-index: 95;
+            width: 450px;
+            pointer-events: none;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            border: 1px solid #0cf;
+            margin-top: 20px;
+            background: #000;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            width: 0%;
+            height: 100%;
+            background: #0cf;
+            box-shadow: 0 0 10px #0cf;
+        }
+
+        #debug-panel {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.85);
+            border: 2px solid #0f0;
+            color: #0f0;
+            padding: 10px 15px;
+            font-family: inherit;
+            font-size: 16px;
+            box-shadow: 0 0 10px #0f04;
+            z-index: 110;
+            pointer-events: none;
+        }
+    </style>
+</head>
+
+<body onclick="initAudio()">
+
+    <div id="debug-panel">
+        SYSTEM FPS: <span id="fps">--</span>
+    </div>
+
+    <div id="overlay">
+        <h1 id="title">NEON-REAP</h1>
+        <p id="desc">BIO-CONTAINMENT BREACH DETECTED</p>
+        <p style="font-size: 14px; color: #666;">WASD to Move | MOUSE to Look | CLICK to Fire</p>
+        <button id="startBtn">START SYSTEM</button>
+    </div>
+
+    <div id="transitionOverlay" style="display:none;">
+        <h1 id="transTitle">FLOOR COMPLETED</h1>
+        <p id="transDesc">TRANSITING TO NEXT SECTOR...</p>
+        <div class="progress-bar">
+            <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <p id="transCountdown" style="font-size: 18px; margin-top: 15px; color: #0cf; font-weight: bold;"></p>
+    </div>
+
+    <div id="ui" style="display:none;">
+        <div>AMMO: <span id="ammo">10</span></div>
+        <div style="color: #0cf;">FLOOR: <span id="floor">1</span> (KILLS: <span id="kills">0</span>/<span
+                id="targetKills">10</span>)</div>
+        <div style="color: #f00;">HP: <span id="hp">100</span>%</div>
+    </div>
+
+    <canvas id="gameCanvas" width="640" height="480"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const ammoEl = document.getElementById('ammo');
+        const hpEl = document.getElementById('hp');
+        const floorEl = document.getElementById('floor');
+        const killsEl = document.getElementById('kills');
+        const targetKillsEl = document.getElementById('targetKills');
+        const overlay = document.getElementById('overlay');
+        const ui = document.getElementById('ui');
+
+        const TILE_SIZE = 64;
+        const FOV = 1.2;
+
+        let MAP = [];
+        const MAP_W = 32;
+        const MAP_H = 32;
+
+        // Precompute cosine and sine offsets for the raycaster
+        const precomputedCos = new Float32Array(640);
+        const precomputedSin = new Float32Array(640);
+        for (let x = 0; x < 640; x++) {
+            let offset = - FOV / 2 + (x / 640) * FOV;
+            precomputedCos[x] = Math.cos(offset);
+            precomputedSin[x] = Math.sin(offset);
+        }
+
+        let player = {
+            x: 100,
+            y: 100,
+            angle: 0,
+            rotSpeed: 0.025,
+            moveSpeed: 8.19,
+            hp: 100,
+            ammo: 10,
+            floor: 1,
+            kills: 0,
+            lastHitTime: 0
+        };
+        let zombies = [];
+        let pickups = [];
+        let muzzleFlash = 0;
+        let audioCtx = null;
+        let hitFlash = 0;
+        let musicInterval = null;
+        let inTransition = false;
+        let mouseIsDown = false;
+        let lastFireTime = 0;
+        const FIRE_RATE_COOLDOWN = 180; // ms (gives ~5.5 shots per second)
+
+        let lastLoopTime = performance.now();
+        let lastFrameTime = performance.now();
+        let frameCount = 0;
+
+        function getTargetKills() {
+            return 10 + (player.floor - 1) * 5;
+        }
+
+        // --- PROCEDURAL GENERATION ENGINE ---
+        function generateProceduralMap() {
+            let map = Array(MAP_H).fill().map(() => Array(MAP_W).fill(1));
+            let rooms = [];
+            const roomCount = 7 + Math.floor(Math.random() * 4);
+
+            for (let i = 0; i < roomCount; i++) {
+                let roomW = Math.floor(Math.random() * 4) + 4;
+                let roomH = Math.floor(Math.random() * 4) + 4;
+                let roomX = Math.floor(Math.random() * (MAP_W - roomW - 2)) + 1;
+                let roomY = Math.floor(Math.random() * (MAP_H - roomH - 2)) + 1;
+
+                for (let y = roomY; y < roomY + roomH; y++) {
+                    for (let x = roomX; x < roomX + roomW; x++) {
+                        map[y][x] = 0;
+                    }
+                }
+                rooms.push({
+                    cx: roomX + Math.floor(roomW / 2),
+                    cy: roomY + Math.floor(roomH / 2)
+                });
+            }
+
+            for (let i = 0; i < rooms.length - 1; i++) {
+                let start = rooms[i];
+                let end = rooms[i + 1];
+
+                for (let x = Math.min(start.cx, end.cx); x <= Math.max(start.cx, end.cx); x++) {
+                    map[start.cy][x] = 0;
+                }
+                for (let y = Math.min(start.cy, end.cy); y <= Math.max(start.cy, end.cy); y++) {
+                    map[y][end.cx] = 0;
+                }
+            }
+
+            player.x = rooms[0].cx * TILE_SIZE + 32;
+            player.y = rooms[0].cy * TILE_SIZE + 32;
+
+            return map;
+        }
+
+        // --- AUDIO ENGINE ---
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                overlay.style.display = 'none';
+                ui.style.display = 'flex';
+                startMusic();
+            }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        function startMusic() {
+            if (musicInterval) clearInterval(musicInterval);
+
+            const tempo = 130;
+            const stepDuration = 60 / tempo / 4;
+            let nextNoteTime = audioCtx.currentTime;
+            let currentStep = 0;
+
+            const E2 = 82.41,
+                E3 = 164.81,
+                D3 = 146.83,
+                C3 = 130.81,
+                Bb2 = 116.54,
+                B2 = 123.47;
+            const bassRiff = [
+                E2, E2, E3, E2, E2, D3, E2, E2,
+                C3, E2, E2, Bb2, E2, E2, B2, C3
+            ];
+
+            function scheduleNote(step, time) {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                const filter = audioCtx.createBiquadFilter();
+
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(bassRiff[step % 16], time);
+
+                filter.type = 'lowpass';
+                filter.frequency.setValueAtTime(450, time);
+                filter.frequency.exponentialRampToValueAtTime(180, time + stepDuration * 0.8);
+
+                gain.gain.setValueAtTime(0.12, time);
+                gain.gain.exponentialRampToValueAtTime(0.01, time + stepDuration * 0.9);
+
+                osc.connect(filter);
+                filter.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                osc.start(time);
+                osc.stop(time + stepDuration);
+
+                if (step % 4 === 0) {
+                    const kickOsc = audioCtx.createOscillator();
+                    const kickGain = audioCtx.createGain();
+                    kickOsc.frequency.setValueAtTime(150, time);
+                    kickOsc.frequency.exponentialRampToValueAtTime(0.01, time + 0.1);
+                    kickGain.gain.setValueAtTime(0.3, time);
+                    kickGain.gain.exponentialRampToValueAtTime(0.01, time + 0.1);
+                    kickOsc.connect(kickGain);
+                    kickGain.connect(audioCtx.destination);
+                    kickOsc.start(time);
+                    kickOsc.stop(time + 0.1);
+                }
+
+                if (step % 4 === 2) {
+                    const snareBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.05, audioCtx.sampleRate);
+                    const snareData = snareBuffer.getChannelData(0);
+                    for (let i = 0; i < snareBuffer.length; i++) {
+                        snareData[i] = Math.random() * 2 - 1;
+                    }
+                    const snareSource = audioCtx.createBufferSource();
+                    snareSource.buffer = snareBuffer;
+                    const snareFilter = audioCtx.createBiquadFilter();
+                    snareFilter.type = 'bandpass';
+                    snareFilter.frequency.setValueAtTime(1000, time);
+                    const snareGain = audioCtx.createGain();
+                    snareGain.gain.setValueAtTime(0.08, time);
+                    snareGain.gain.exponentialRampToValueAtTime(0.01, time + 0.05);
+                    snareSource.connect(snareFilter);
+                    snareFilter.connect(snareGain);
+                    snareGain.connect(audioCtx.destination);
+                    snareSource.start(time);
+                    snareSource.stop(time + 0.05);
+                }
+            }
+
+            musicInterval = setInterval(() => {
+                while (nextNoteTime < audioCtx.currentTime + 0.1) {
+                    scheduleNote(currentStep, nextNoteTime);
+                    nextNoteTime += stepDuration;
+                    currentStep++;
+                }
+            }, 25);
+        }
+
+        function playGunSound() {
+            if (!audioCtx) return;
+            const bufferSize = audioCtx.sampleRate * 0.1;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(1200, audioCtx.currentTime);
+            filter.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.1);
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.45, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            source.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            source.start();
+        }
+
+        function playHitSound() {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(20, audioCtx.currentTime + 0.2);
+            gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.2);
+        }
+
+        function playZombieGroan() {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(80, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(130, audioCtx.currentTime + 0.6);
+            gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(400, audioCtx.currentTime);
+            osc.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.6);
+        }
+
+        function playPickupSound(isHealth) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'triangle';
+
+            if (isHealth) {
+                osc.frequency.setValueAtTime(330, audioCtx.currentTime);
+                osc.frequency.setValueAtTime(660, audioCtx.currentTime + 0.07);
+                gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.25);
+            } else {
+                osc.frequency.setValueAtTime(520, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(1040, audioCtx.currentTime + 0.08);
+                gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.09);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.09);
+            }
+        }
+
+        function playTransitionSound() {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(220, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.5);
+            gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.5);
+        }
+
+        let dijkstraMap = Array(MAP_H).fill().map(() => Array(MAP_W).fill(Infinity));
+        let lastPlayerGridX = -1;
+        let lastPlayerGridY = -1;
+
+        // Pre-allocate queue buffers to avoid garbage collection overhead
+        const pathQueueX = new Int32Array(MAP_W * MAP_H);
+        const pathQueueY = new Int32Array(MAP_W * MAP_H);
+
+        function hasLineOfSight(x1, y1, x2, y2) {
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            let dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist === 0) return true;
+            let vx = dx / dist;
+            let vy = dy / dist;
+
+            // Step along the ray in 32px increments to detect walls
+            for (let d = 0; d < dist; d += 32) {
+                let tx = (x1 + vx * d) >> 6;
+                let ty = (y1 + vy * d) >> 6;
+                if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H || MAP[ty][tx] === 1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        function updateDijkstraMap() {
+            const playerGridX = Math.floor(player.x / TILE_SIZE);
+            const playerGridY = Math.floor(player.y / TILE_SIZE);
+
+            // Only run if the player moves to a new tile
+            if (playerGridX === lastPlayerGridX && playerGridY === lastPlayerGridY) {
+                return;
+            }
+            lastPlayerGridX = playerGridX;
+            lastPlayerGridY = playerGridY;
+
+            // Reset existing grid values to Infinity without allocating new arrays
+            for (let y = 0; y < MAP_H; y++) {
+                for (let x = 0; x < MAP_W; x++) {
+                    dijkstraMap[y][x] = Infinity;
+                }
+            }
+
+            if (playerGridX < 0 || playerGridX >= MAP_W || playerGridY < 0 || playerGridY >= MAP_H) {
+                return;
+            }
+
+            let head = 0;
+            let tail = 0;
+            dijkstraMap[playerGridY][playerGridX] = 0;
+            pathQueueX[tail] = playerGridX;
+            pathQueueY[tail] = playerGridY;
+            tail++;
+
+            const dirs = [
+                { x: 0, y: -1 },
+                { x: 0, y: 1 },
+                { x: -1, y: 0 },
+                { x: 1, y: 0 }
+            ];
+
+            while (head < tail) {
+                const cx = pathQueueX[head];
+                const cy = pathQueueY[head];
+                head++;
+                const currDist = dijkstraMap[cy][cx];
+
+                for (const d of dirs) {
+                    const nx = cx + d.x;
+                    const ny = cy + d.y;
+
+                    if (nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H && MAP[ny][nx] === 0) {
+                        if (dijkstraMap[ny][nx] === Infinity) {
+                            dijkstraMap[ny][nx] = currDist + 1;
+                            pathQueueX[tail] = nx;
+                            pathQueueY[tail] = ny;
+                            tail++;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- SPAWN LOGIC ---
+        function spawnZombie() {
+            let rx, ry, success = false;
+            let attempts = 0;
+            while (!success && attempts < 100) {
+                attempts++;
+                rx = Math.floor(Math.random() * MAP_W);
+                ry = Math.floor(Math.random() * MAP_H);
+                let tx = rx * TILE_SIZE + 32,
+                    ty = ry * TILE_SIZE + 32;
+                let dist = Math.sqrt((tx - player.x) ** 2 + (ty - player.y) ** 2);
+
+                let dx = tx - player.x;
+                let dy = ty - player.y;
+                let spawnAngle = Math.atan2(dy, dx);
+                let angleDiff = spawnAngle - player.angle;
+                while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+                while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+
+                // Spawns out of player's direct visibility (either behind walls or outside FOV)
+                let visible = Math.abs(angleDiff) < 0.8 && hasLineOfSight(player.x, player.y, tx, ty);
+
+                if (mapTileIsFree(rx, ry) && dist > 400 && (!visible || attempts > 50)) {
+                    success = true;
+                }
+            }
+            if (success) {
+                zombies.push({
+                    x: rx * TILE_SIZE + 32,
+                    y: ry * TILE_SIZE + 32,
+                    alive: true,
+                    // Reduced by 5% from base 1.98 / random 1.32 / scale 0.165
+                    speed: (1.98 + Math.random() * 1.32 + (player.floor * 0.165)) * 0.95,
+                    lastGroan: 0,
+                    lastHit: 0
+                });
+            }
+        }
+
+        function spawnPickup() {
+            let rx, ry, success = false;
+            while (!success) {
+                rx = Math.floor(Math.random() * MAP_W);
+                ry = Math.floor(Math.random() * MAP_H);
+                let tx = rx * TILE_SIZE + 32,
+                    ty = ry * TILE_SIZE + 32;
+                let dist = Math.sqrt((tx - player.x) ** 2 + (ty - player.y) ** 2);
+                if (mapTileIsFree(rx, ry) && dist > 400) {
+                    success = true;
+                }
+            }
+
+            // Balanced: Natural spawns roll a 30% chance to be health packs
+            let spawnType = Math.random() < 0.30 ? 'health' : 'ammo';
+
+            pickups.push({
+                x: rx * TILE_SIZE + 32,
+                y: ry * TILE_SIZE + 32,
+                type: spawnType,
+                isDrop: false
+            });
+        }
+
+        function mapTileIsFree(x, y) {
+            if (x < 0 || x >= MAP_W || y < 0 || y >= MAP_H) return false;
+            return MAP[y][x] === 0;
+        }
+
+        // --- CONTROLS ---
+        const keys = {};
+        window.addEventListener('keydown', e => keys[e.code] = true);
+        window.addEventListener('keyup', e => keys[e.code] = false);
+        canvas.addEventListener('mousedown', () => {
+            canvas.requestPointerLock();
+            mouseIsDown = true;
+            const now = Date.now();
+            if (now - lastFireTime > FIRE_RATE_COOLDOWN) {
+                shoot();
+                lastFireTime = now;
+            }
+        });
+        window.addEventListener('mouseup', () => {
+            mouseIsDown = false;
+        });
+        document.addEventListener('pointerlockchange', () => {
+            if (document.pointerLockElement !== canvas) {
+                mouseIsDown = false;
+            }
+        });
+        canvas.addEventListener('mousemove', (e) => {
+            if (document.pointerLockElement === canvas) {
+                player.angle += e.movementX * 0.003;
+            }
+        });
+
+        function shoot() {
+            if (inTransition) return;
+            if (player.ammo <= 0) return;
+            player.ammo--;
+            ammoEl.innerText = player.ammo;
+            muzzleFlash = 10;
+            playGunSound();
+
+            let closestZombie = null;
+            let closestDist = 600;
+
+            zombies.forEach(z => {
+                if (!z.alive) return;
+                let dx = z.x - player.x,
+                    dy = z.y - player.y;
+                let dist = Math.sqrt(dx * dx + dy * dy);
+                let angleToZombie = Math.atan2(dy, dx) - player.angle;
+                while (angleToZombie < -Math.PI) angleToZombie += Math.PI * 2;
+                while (angleToZombie > Math.PI) angleToZombie -= Math.PI * 2;
+
+                // FIX: Calculate target width window scale dynamically based on distance.
+                // Treats enemies as 3D cylinders instead of mathematical single pixel points.
+                let enemyRadius = 24;
+                let angularWidth = Math.atan2(enemyRadius, dist);
+                let targetTolerance = Math.max(0.2, angularWidth);
+
+                if (Math.abs(angleToZombie) < targetTolerance && dist < closestDist) {
+                    let wallDist = 2000;
+                    let vx = dx / (dist || 0.1);
+                    let vy = dy / (dist || 0.1);
+                    for (let d = 0; d < dist; d += 12) {
+                        let tx = Math.floor((player.x + vx * d) / TILE_SIZE);
+                        let ty = Math.floor((player.y + vy * d) / TILE_SIZE);
+                        if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H || MAP[ty][tx] === 1) {
+                            wallDist = d;
+                            break;
+                        }
+                    }
+                    if (dist < wallDist) {
+                        closestZombie = z;
+                        closestDist = dist;
+                    }
+                }
+            });
+
+            if (closestZombie) {
+                closestZombie.alive = false;
+                player.kills++;
+                killsEl.innerText = player.kills;
+
+                // Dynamic Enemy Drops: Health/Ammo drop chance increases the closer to zero player's resources are (health halved)
+                let healthDropChance = (0.08 + 0.32 * (1 - Math.max(0, Math.min(100, player.hp)) / 100)) * 0.5;
+                // Decreased by 45% (retains 55% of original rate)
+                let ammoDropChance = (0.18 + 0.32 * (1 - Math.max(0, Math.min(10, player.ammo)) / 10)) * 0.55;
+                let dropRand = Math.random();
+                if (dropRand < healthDropChance) {
+                    pickups.push({
+                        x: closestZombie.x,
+                        y: closestZombie.y,
+                        type: 'health',
+                        isDrop: true
+                    });
+                } else if (dropRand < healthDropChance + ammoDropChance) {
+                    pickups.push({
+                        x: closestZombie.x,
+                        y: closestZombie.y,
+                        type: 'ammo',
+                        isDrop: true
+                    });
+                }
+
+                if (player.kills >= getTargetKills()) {
+                    triggerFloorTransition();
+                    return;
+                }
+
+                setTimeout(() => {
+                    if (player.hp <= 0) return;
+                    let rx, ry, distCheck, success = false;
+                    let attempts = 0;
+                    while (!success && attempts < 100) {
+                        attempts++;
+                        rx = Math.floor(Math.random() * MAP_W);
+                        ry = Math.floor(Math.random() * MAP_H);
+                        let tx = rx * TILE_SIZE + 32;
+                        let ty = ry * TILE_SIZE + 32;
+                        distCheck = Math.sqrt((tx - player.x) ** 2 + (ty - player.y) ** 2);
+
+                        let dx = tx - player.x;
+                        let dy = ty - player.y;
+                        let spawnAngle = Math.atan2(dy, dx);
+                        let angleDiff = spawnAngle - player.angle;
+                        while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+                        while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+
+                        // Spawns out of player's direct visibility (either behind walls or outside FOV)
+                        let visible = Math.abs(angleDiff) < 0.8 && hasLineOfSight(player.x, player.y, tx, ty);
+
+                        if (mapTileIsFree(rx, ry) && distCheck > 400 && (!visible || attempts > 50)) {
+                            success = true;
+                        }
+                    }
+                    if (success) {
+                        closestZombie.x = rx * TILE_SIZE + 32;
+                        closestZombie.y = ry * TILE_SIZE + 32;
+                        closestZombie.alive = true;
+                    }
+                }, 3000);
+            }
+        }
+
+        function triggerFloorTransition() {
+            inTransition = true;
+            muzzleFlash = 0;
+            playTransitionSound();
+
+            player.floor++;
+            player.kills = 0;
+
+            floorEl.innerText = player.floor;
+            killsEl.innerText = player.kills;
+            targetKillsEl.innerText = getTargetKills();
+
+            MAP = generateProceduralMap();
+            lastPlayerGridX = -1;
+            lastPlayerGridY = -1;
+            zombies = [];
+            pickups = [];
+
+            for (let i = 0; i < 6; i++) spawnZombie();
+            for (let i = 0; i < 3; i++) spawnPickup();
+
+            const transOverlay = document.getElementById('transitionOverlay');
+            const transTitle = document.getElementById('transTitle');
+            const transDesc = document.getElementById('transDesc');
+            const transCountdown = document.getElementById('transCountdown');
+            const progressFill = document.getElementById('progressFill');
+
+            transTitle.innerText = `FLOOR ${player.floor - 1} SECURED`;
+            transDesc.innerText = `DECOMPRESSING AIRLOCK TO SECTOR ${player.floor}...`;
+            transOverlay.style.display = 'block';
+
+            progressFill.style.width = '0%';
+            void progressFill.offsetWidth;
+            progressFill.style.transition = 'width 3s linear';
+            progressFill.style.width = '100%';
+
+            let timeLeft = 3;
+            transCountdown.innerText = `INITIALIZING SYSTEM IN ${timeLeft}...`;
+
+            const countdownInterval = setInterval(() => {
+                timeLeft--;
+                if (timeLeft > 0) {
+                    transCountdown.innerText = `INITIALIZING SYSTEM IN ${timeLeft}...`;
+                } else {
+                    clearInterval(countdownInterval);
+                }
+            }, 1000);
+
+            setTimeout(() => {
+                transOverlay.style.display = 'none';
+                inTransition = false;
+            }, 3000);
+        }
+
+        function update(dt) {
+            if (inTransition) return;
+            updateDijkstraMap();
+
+            // Auto/rapid fire when holding mouse click
+            if (mouseIsDown && document.pointerLockElement === canvas) {
+                const now = Date.now();
+                if (now - lastFireTime > FIRE_RATE_COOLDOWN) {
+                    shoot();
+                    lastFireTime = now;
+                }
+            }
+
+            let rateScale = dt * 60;
+            let moveX = 0;
+            let moveY = 0;
+            if (keys['KeyW']) {
+                moveX += Math.cos(player.angle) * player.moveSpeed * rateScale;
+                moveY += Math.sin(player.angle) * player.moveSpeed * rateScale;
+            }
+            if (keys['KeyS']) {
+                moveX -= Math.cos(player.angle) * player.moveSpeed * rateScale;
+                moveY -= Math.sin(player.angle) * player.moveSpeed * rateScale;
+            }
+            if (keys['KeyA']) {
+                moveX += Math.cos(player.angle - Math.PI / 2) * player.moveSpeed * rateScale;
+                moveY += Math.sin(player.angle - Math.PI / 2) * player.moveSpeed * rateScale;
+            }
+            if (keys['KeyD']) {
+                moveX += Math.cos(player.angle + Math.PI / 2) * player.moveSpeed * rateScale;
+                moveY += Math.sin(player.angle + Math.PI / 2) * player.moveSpeed * rateScale;
+            }
+
+            let padding = 16;
+            let newX = player.x + moveX;
+            let checkX = moveX > 0 ? newX + padding : newX - padding;
+            if (MAP[Math.floor(player.y / TILE_SIZE)][Math.floor(checkX / TILE_SIZE)] === 0) {
+                player.x = newX;
+            }
+
+            let newY = player.y + moveY;
+            let checkY = moveY > 0 ? newY + padding : newY - padding;
+            if (MAP[Math.floor(checkY / TILE_SIZE)][Math.floor(player.x / TILE_SIZE)] === 0) {
+                player.y = newY;
+            }
+
+            zombies.forEach(z => {
+                if (!z.alive) return;
+
+                let targetX = player.x;
+                let targetY = player.y;
+                let hasLOS = hasLineOfSight(z.x, z.y, player.x, player.y);
+
+                if (!hasLOS) {
+                    let zx = Math.floor(z.x / TILE_SIZE);
+                    let zy = Math.floor(z.y / TILE_SIZE);
+
+                    let bestX = zx;
+                    let bestY = zy;
+                    let minVal = (dijkstraMap[zy] && dijkstraMap[zy][zx] !== undefined) ? dijkstraMap[zy][zx] : Infinity;
+
+                    const neighbors = [
+                        { x: zx, y: zy - 1 },
+                        { x: zx, y: zy + 1 },
+                        { x: zx - 1, y: zy },
+                        { x: zx + 1, y: zy }
+                    ];
+
+                    for (const n of neighbors) {
+                        if (n.x >= 0 && n.x < MAP_W && n.y >= 0 && n.y < MAP_H) {
+                            let val = dijkstraMap[n.y][n.x];
+                            if (val < minVal) {
+                                minVal = val;
+                                bestX = n.x;
+                                bestY = n.y;
+                            }
+                        }
+                    }
+
+                    targetX = bestX * TILE_SIZE + 32;
+                    targetY = bestY * TILE_SIZE + 32;
+                }
+
+                let tdx = targetX - z.x;
+                let tdy = targetY - z.y;
+                let tdist = Math.sqrt(tdx * tdx + tdy * tdy);
+                if (tdist === 0) tdist = 0.1;
+
+                // Target velocity components
+                let targetVx = (tdx / tdist) * z.speed;
+                let targetVy = (tdy / tdist) * z.speed;
+
+                // Sluggish stagger/wobble for an organic zombie movement feel
+                let wobbleAngle = Math.sin(Date.now() * 0.005 + (z.x + z.y)) * 0.35;
+                let wCos = Math.cos(wobbleAngle);
+                let wSin = Math.sin(wobbleAngle);
+                let wobbledVx = targetVx * wCos - targetVy * wSin;
+                let wobbledVy = targetVx * wSin + targetVy * wCos;
+
+                // Inertia: smooth/interpolate velocity changes over time to prevent machine-like instant corner cuts
+                z.vx = z.vx !== undefined ? z.vx : wobbledVx;
+                z.vy = z.vy !== undefined ? z.vy : wobbledVy;
+                z.vx += (wobbledVx - z.vx) * 0.08 * rateScale;
+                z.vy += (wobbledVy - z.vy) * 0.08 * rateScale;
+
+                let vx = z.vx;
+                let vy = z.vy;
+
+                // Separation force to prevent bunching/stacking
+                let sepX = 0;
+                let sepY = 0;
+                let sepCount = 0;
+                zombies.forEach(other => {
+                    if (other === z || !other.alive) return;
+                    let odx = z.x - other.x;
+                    let ody = z.y - other.y;
+                    let odist = Math.sqrt(odx * odx + ody * ody);
+                    if (odist > 0 && odist < 30) {
+                        sepX += odx / odist;
+                        sepY += ody / odist;
+                        sepCount++;
+                    }
+                });
+
+                if (sepCount > 0) {
+                    vx += (sepX / sepCount) * 0.5;
+                    vy += (sepY / sepCount) * 0.5;
+                }
+
+                // Normalize combined velocity and scale by rateScale to ensure zombies maintain full speed
+                let speed = Math.sqrt(vx * vx + vy * vy);
+                if (speed > 0) {
+                    vx = (vx / speed) * z.speed * rateScale;
+                    vy = (vy / speed) * z.speed * rateScale;
+                }
+
+                // Anti-Clipping Bounds: Enforce strict stopping radius outside player cylinder bounds
+                let dist = Math.sqrt((player.x - z.x) ** 2 + (player.y - z.y) ** 2);
+                let minDistanceToPlayer = 26;
+                if (dist < minDistanceToPlayer) {
+                    vx = 0;
+                    vy = 0;
+                }
+
+                // Decoupled Axis Wall Tracking: Allows sliding dynamically around corners
+                let zPadding = 12;
+
+                if (vx !== 0) {
+                    let nextZX = z.x + vx;
+                    let checkZX = vx > 0 ? nextZX + zPadding : nextZX - zPadding;
+                    if (MAP[Math.floor(z.y / TILE_SIZE)][Math.floor(checkZX / TILE_SIZE)] === 0) {
+                        z.x = nextZX;
+                    } else {
+                        z.vx = 0; // Cancel velocity component on wall collision
+                    }
+                }
+
+                if (vy !== 0) {
+                    let nextZY = z.y + vy;
+                    let checkZY = vy > 0 ? nextZY + zPadding : nextZY - zPadding;
+                    if (MAP[Math.floor(checkZY / TILE_SIZE)][Math.floor(z.x / TILE_SIZE)] === 0) {
+                        z.y = nextZY;
+                    } else {
+                        z.vy = 0; // Cancel velocity component on wall collision
+                    }
+                }
+
+                if (dist < 150 && Date.now() - z.lastGroan > 2500) {
+                    playZombieGroan();
+                    z.lastGroan = Date.now();
+                }
+
+                if (dist < 32) {
+                    const now = Date.now();
+                    // Player-wide i-frame duration of 420ms (70% of 600ms)
+                    if (now - player.lastHitTime > 420) {
+                        let dmg = Math.floor(Math.random() * 5) + 3;
+                        player.hp -= dmg;
+                        hpEl.innerText = Math.max(0, Math.ceil(player.hp));
+                        player.lastHitTime = now;
+                        z.lastHit = now;
+                        playHitSound();
+                        hitFlash = 5;
+                        if (player.hp <= 0) {
+                            overlay.style.display = 'block';
+                            document.getElementById('title').innerText = "SYSTEM FAILURE";
+                            document.getElementById('desc').innerText = "BIOLOGICAL SIGNATURE TERMINATED";
+                        }
+                    }
+                }
+            });
+
+            pickups.forEach((p, index) => {
+                let dist = Math.sqrt((p.x - player.x) ** 2 + (p.y - player.y) ** 2);
+                if (dist < 40) {
+                    if (p.type === 'health') {
+                        player.hp = Math.min(100, player.hp + 30);
+                        hpEl.innerText = Math.ceil(player.hp);
+                        playPickupSound(true);
+                    } else {
+                        player.ammo += 5 + Math.floor(Math.random() * 6);
+                        ammoEl.innerText = player.ammo;
+                        playPickupSound(false);
+                    }
+                    pickups.splice(index, 1);
+
+                    if (pickups.filter(item => !item.isDrop).length < 3) {
+                        spawnPickup();
+                    }
+                }
+            });
+
+            if (Math.random() < 0.01 && zombies.filter(z => z.alive).length < 10) spawnZombie();
+            if (muzzleFlash > 0) muzzleFlash--;
+            if (hitFlash > 0) hitFlash--;
+
+            // Pulse/flicker HP text color during player i-frames (420ms)
+            const isInvincible = (Date.now() - player.lastHitTime) < 420;
+            if (isInvincible) {
+                hpEl.parentElement.style.color = Math.floor(Date.now() / 100) % 2 === 0 ? '#fff' : '#f00';
+            } else {
+                if (hpEl.parentElement.style.color !== 'rgb(255, 0, 0)' && hpEl.parentElement.style.color !== '#f00') {
+                    hpEl.parentElement.style.color = '#f00';
+                }
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = "#111";
+            ctx.fillRect(0, 0, canvas.width, canvas.height / 2);
+            ctx.fillStyle = "#222";
+            ctx.fillRect(0, canvas.height / 2, canvas.width, canvas.height / 2);
+
+            const cosA = Math.cos(player.angle);
+            const sinA = Math.sin(player.angle);
+
+            // Raycaster Loop
+            for (let x = 0; x < canvas.width; x++) {
+                const cosB = precomputedCos[x];
+                const sinB = precomputedSin[x];
+                const eyeX = cosA * cosB - sinA * sinB;
+                const eyeY = sinA * cosB + cosA * sinB;
+
+                let distanceToWall = 0,
+                    hitWall = false;
+
+                while (!hitWall && distanceToWall < 2000) {
+                    distanceToWall += 4;
+                    let testX = (player.x + eyeX * distanceToWall) >> 6;
+                    let testY = (player.y + eyeY * distanceToWall) >> 6;
+                    if (testX < 0 || testX >= MAP_W || testY < 0 || testY >= MAP_H) {
+                        hitWall = true;
+                        distanceToWall = 2000;
+                    } else if (MAP[testY][testX] === 1) {
+                        hitWall = true;
+                    }
+                }
+
+                let correctedDist = distanceToWall * cosB;
+                if (correctedDist < 1) correctedDist = 1;
+
+                let ceiling = (canvas.height / 2) - canvas.height / correctedDist * TILE_SIZE * 0.5;
+                let floor = canvas.height - ceiling;
+                let color = 40 - (distanceToWall / 2000 * 40);
+                ctx.strokeStyle = `rgb(0, ${color + 20}, 0)`;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(x, ceiling);
+                ctx.lineTo(x, floor);
+                ctx.stroke();
+            }
+
+            // --- DEPTH BUFFER DRAW MATRIX ---
+            let renderableSprites = [];
+
+            pickups.forEach(p => {
+                let dx = p.x - player.x,
+                    dy = p.y - player.y;
+                let dist = Math.sqrt(dx * dx + dy * dy);
+                renderableSprites.push({
+                    x: p.x,
+                    y: p.y,
+                    dist: dist,
+                    type: 'pickup',
+                    data: p
+                });
+            });
+
+            zombies.forEach(z => {
+                if (!z.alive) return;
+                let dx = z.x - player.x,
+                    dy = z.y - player.y;
+                let dist = Math.sqrt(dx * dx + dy * dy);
+                renderableSprites.push({
+                    x: z.x,
+                    y: z.y,
+                    dist: dist,
+                    type: 'zombie',
+                    data: z
+                });
+            });
+
+            renderableSprites.sort((a, b) => b.dist - a.dist);
+
+            renderableSprites.forEach(sprite => {
+                let dx = sprite.x - player.x;
+                let dy = sprite.y - player.y;
+                let angleToSprite = Math.atan2(dy, dx) - player.angle;
+                while (angleToSprite < -Math.PI) angleToSprite += Math.PI * 2;
+                while (angleToSprite > Math.PI) angleToSprite -= Math.PI * 2;
+
+                if (Math.abs(angleToSprite) < FOV / 2 && sprite.dist > 10 && sprite.dist < 1200) {
+                    let wallDist = 2000;
+                    let checkX = dx / sprite.dist;
+                    let checkY = dy / sprite.dist;
+                    for (let d = 0; d < sprite.dist; d += 12) {
+                        let tx = (player.x + checkX * d) >> 6;
+                        let ty = (player.y + checkY * d) >> 6;
+                        if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H || MAP[ty][tx] === 1) {
+                            wallDist = d;
+                            break;
+                        }
+                    }
+
+                    if (sprite.dist < wallDist) {
+                        let spriteSize = canvas.height / sprite.dist * TILE_SIZE * 0.5;
+                        let xPos = (angleToSprite / FOV) * canvas.width + (canvas.width / 2);
+
+                        if (sprite.type === 'pickup') {
+                            if (sprite.data.type === 'health') {
+                                ctx.fillStyle = "#f0f";
+                                ctx.fillRect(xPos - spriteSize / 4, canvas.height / 2 - spriteSize / 4, spriteSize / 2, spriteSize / 2);
+                                ctx.fillStyle = "#fff";
+                                ctx.fillRect(xPos - spriteSize / 16, canvas.height / 2 - spriteSize / 6, spriteSize / 8, spriteSize / 3);
+                                ctx.fillRect(xPos - spriteSize / 6, canvas.height / 2 - spriteSize / 16, spriteSize / 3, spriteSize / 8);
+                            } else {
+                                ctx.fillStyle = "#ff0";
+                                ctx.fillRect(xPos - spriteSize / 4, canvas.height / 2 - spriteSize / 2, spriteSize / 2, spriteSize);
+                            }
+                        } else if (sprite.type === 'zombie') {
+                            ctx.fillStyle = "#333";
+                            ctx.fillRect(xPos - spriteSize / 3, canvas.height / 2 - spriteSize / 3, spriteSize / 3, spriteSize / 2);
+                            ctx.fillStyle = "#222";
+                            ctx.fillRect(xPos - spriteSize / 6, canvas.height / 2 - spriteSize / 1.5, spriteSize / 3, spriteSize / 3);
+                            ctx.fillStyle = "#0f0";
+                            ctx.fillRect(xPos - spriteSize / 8, canvas.height / 2 - spriteSize / 1.2, spriteSize / 10, spriteSize / 10);
+                            ctx.fillRect(xPos + spriteSize / 20, canvas.height / 2 - spriteSize / 1.2, spriteSize / 10, spriteSize / 10);
+                        }
+                    }
+                }
+            });
+
+            // --- RENDER GUN SPRITE ---
+            let gunX = canvas.width / 2;
+            let gunY = canvas.height;
+            if (muzzleFlash > 0) gunY += 16;
+
+            const isInvincibleDraw = (Date.now() - player.lastHitTime) < 420;
+            if (isInvincibleDraw && Math.floor(Date.now() / 50) % 2 === 0) {
+                // Skip drawing gun to create flickering effect during i-frames
+            } else {
+                ctx.fillStyle = "#1a1a1a";
+                ctx.fillRect(gunX - 25, gunY - 110, 50, 110);
+
+                ctx.fillStyle = "#2d2d2d";
+                ctx.fillRect(gunX - 20, gunY - 140, 16, 140);
+                ctx.fillRect(gunX + 4, gunY - 140, 16, 140);
+
+                ctx.fillStyle = "#0f0";
+                ctx.fillRect(gunX - 20, gunY - 140, 2, 140);
+                ctx.fillRect(gunX + 18, gunY - 140, 2, 140);
+                ctx.fillRect(gunX - 4, gunY - 80, 8, 25);
+            }
+
+            if (muzzleFlash > 0) {
+                ctx.fillStyle = "rgba(0, 255, 0, 0.4)";
+                ctx.beginPath();
+                ctx.arc(gunX, gunY - 145, 45 + Math.random() * 15, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = "#fff";
+                ctx.beginPath();
+                ctx.arc(gunX - 12, gunY - 145, 15 + Math.random() * 8, 0, Math.PI * 2);
+                ctx.arc(gunX + 12, gunY - 145, 15 + Math.random() * 8, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            if (hitFlash > 0) {
+                ctx.fillStyle = `rgba(255, 0, 0, ${hitFlash / 50})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            // Crosshair
+            ctx.strokeStyle = "lime";
+            ctx.beginPath();
+            ctx.moveTo(canvas.width / 2 - 10, canvas.height / 2);
+            ctx.lineTo(canvas.width / 2 + 10, canvas.height / 2);
+            ctx.moveTo(canvas.width / 2, canvas.height / 2 - 10);
+            ctx.lineTo(canvas.width / 2, canvas.height / 2 + 10);
+            ctx.stroke();
+        }
+
+        function loop() {
+            if (player.hp > 0) {
+                const now = performance.now();
+                let dt = (now - lastLoopTime) / 1000;
+                if (dt > 0.1) dt = 0.1; // Cap dt to prevent massive jumps when tab is throttled
+                lastLoopTime = now;
+
+                frameCount++;
+                if (now - lastFrameTime >= 1000) {
+                    const fps = frameCount;
+                    frameCount = 0;
+                    lastFrameTime = now;
+                    const fpsValEl = document.getElementById('fps');
+                    if (fpsValEl) {
+                        fpsValEl.innerText = fps;
+                        if (fps >= 55) fpsValEl.style.color = '#0f0';
+                        else if (fps >= 30) fpsValEl.style.color = '#ff0';
+                        else fpsValEl.style.color = '#f00';
+                    }
+                }
+
+                update(dt);
+                draw();
+                requestAnimationFrame(loop);
+            }
+        }
+
+        startBtn.addEventListener('click', () => {
+            initAudio();
+            resetGame();
+        });
+
+        function resetGame() {
+            inTransition = false;
+            lastPlayerGridX = -1;
+            lastPlayerGridY = -1;
+            lastLoopTime = performance.now();
+            lastFrameTime = performance.now();
+            frameCount = 0;
+            const transOverlay = document.getElementById('transitionOverlay');
+            if (transOverlay) transOverlay.style.display = 'none';
+
+            player = {
+                x: 100,
+                y: 100,
+                angle: 0,
+                rotSpeed: 0.025,
+                moveSpeed: 8.19,
+                hp: 100,
+                ammo: 10,
+                floor: 1,
+                kills: 0,
+                lastHitTime: 0
+            };
+            zombies = [];
+            pickups = [];
+            muzzleFlash = 0;
+            hitFlash = 0;
+
+            MAP = generateProceduralMap();
+
+            hpEl.innerText = player.hp;
+            ammoEl.innerText = player.ammo;
+            floorEl.innerText = player.floor;
+            killsEl.innerText = player.kills;
+            targetKillsEl.innerText = getTargetKills();
+
+            for (let i = 0; i < 6; i++) spawnZombie();
+            for (let i = 0; i < 3; i++) spawnPickup();
+            overlay.style.display = 'none';
+            ui.style.display = 'flex';
+            requestAnimationFrame(loop);
+        }
+    </script>
+</body>
+
+</html>
