@@ -109,6 +109,35 @@
             z-index: 110;
             pointer-events: none;
         }
+
+        #pauseOverlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            background: rgba(5, 15, 5, 0.95);
+            padding: 40px 50px;
+            border: 4px solid #0f0;
+            box-shadow: 0 0 30px rgba(0, 255, 0, 0.4), inset 0 0 15px rgba(0, 255, 0, 0.15);
+            color: #0f0;
+            font-family: inherit;
+            z-index: 105;
+            width: 420px;
+        }
+
+        #pauseOverlay h1 {
+            margin-top: 0;
+            font-size: 30px;
+            letter-spacing: 3px;
+            text-shadow: 0 0 10px #0f0;
+        }
+
+        #pauseOverlay p {
+            color: #8f8;
+            font-size: 15px;
+            margin: 15px 0 25px 0;
+        }
     </style>
 </head>
 
@@ -121,7 +150,7 @@
     <div id="overlay">
         <h1 id="title">NEON-REAP</h1>
         <p id="desc">BIO-CONTAINMENT BREACH DETECTED</p>
-        <p style="font-size: 14px; color: #666;">WASD to Move | MOUSE to Look | CLICK to Fire</p>
+        <p style="font-size: 14px; color: #666;">WASD to Move | MOUSE to Look | CLICK to Fire | ESC to Pause</p>
         <button id="startBtn">START SYSTEM</button>
     </div>
 
@@ -132,6 +161,13 @@
             <div id="progressFill" class="progress-fill"></div>
         </div>
         <p id="transCountdown" style="font-size: 18px; margin-top: 15px; color: #0cf; font-weight: bold;"></p>
+    </div>
+
+    <div id="pauseOverlay" style="display:none;">
+        <h1>SYSTEM PAUSED</h1>
+        <p>BIO-CONTAINMENT TACTICAL PAUSE</p>
+        <p style="font-size: 13px; color: #666; margin-bottom: 20px;">PRESS [ESC] OR CLICK BELOW TO RESUME</p>
+        <button id="resumeBtn">RESUME SYSTEM</button>
     </div>
 
     <div id="ui" style="display:none;">
@@ -189,6 +225,8 @@
         let hitFlash = 0;
         let musicInterval = null;
         let inTransition = false;
+        let isPaused = false;
+        let lastPauseTime = 0;
         let mouseIsDown = false;
         let lastFireTime = 0;
         const FIRE_RATE_COOLDOWN = 180; // ms (gives ~5.5 shots per second)
@@ -199,6 +237,44 @@
 
         function getTargetKills() {
             return 10 + (player.floor - 1) * 5;
+        }
+
+        function togglePause() {
+            if (overlay.style.display !== 'none' || player.hp <= 0) return;
+            if (isPaused) {
+                if (Date.now() - lastPauseTime > 150) {
+                    resumeGame();
+                }
+            } else {
+                pauseGame();
+            }
+        }
+
+        function pauseGame() {
+            if (isPaused || overlay.style.display !== 'none' || player.hp <= 0) return;
+            isPaused = true;
+            lastPauseTime = Date.now();
+            mouseIsDown = false;
+            const pauseOverlay = document.getElementById('pauseOverlay');
+            if (pauseOverlay) pauseOverlay.style.display = 'block';
+            if (document.pointerLockElement === canvas) {
+                document.exitPointerLock();
+            }
+            if (audioCtx && audioCtx.state === 'running') {
+                audioCtx.suspend();
+            }
+        }
+
+        function resumeGame() {
+            if (!isPaused) return;
+            isPaused = false;
+            const pauseOverlay = document.getElementById('pauseOverlay');
+            if (pauseOverlay) pauseOverlay.style.display = 'none';
+            lastLoopTime = performance.now();
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            canvas.requestPointerLock();
         }
 
         // --- PROCEDURAL GENERATION ENGINE ---
@@ -590,9 +666,18 @@
 
         // --- CONTROLS ---
         const keys = {};
-        window.addEventListener('keydown', e => keys[e.code] = true);
+        window.addEventListener('keydown', e => {
+            keys[e.code] = true;
+            if (e.code === 'Escape') {
+                togglePause();
+            }
+        });
         window.addEventListener('keyup', e => keys[e.code] = false);
         canvas.addEventListener('mousedown', () => {
+            if (isPaused) {
+                resumeGame();
+                return;
+            }
             canvas.requestPointerLock();
             mouseIsDown = true;
             const now = Date.now();
@@ -607,6 +692,9 @@
         document.addEventListener('pointerlockchange', () => {
             if (document.pointerLockElement !== canvas) {
                 mouseIsDown = false;
+                if (overlay.style.display === 'none' && player.hp > 0 && !inTransition && !isPaused) {
+                    pauseGame();
+                }
             }
         });
         canvas.addEventListener('mousemove', (e) => {
@@ -616,7 +704,7 @@
         });
 
         function shoot() {
-            if (inTransition) return;
+            if (inTransition || isPaused) return;
             if (player.ammo <= 0) return;
             player.ammo--;
             ammoEl.innerText = player.ammo;
@@ -665,12 +753,23 @@
                 player.kills++;
                 killsEl.innerText = player.kills;
 
-                // Dynamic Enemy Drops: Health/Ammo drop chance increases the closer to zero player's resources are
-                let healthDropChance = (0.08 + 0.32 * (1 - Math.max(0, Math.min(100, player.hp)) / 100)) * 0.5;
-                // Enhanced dynamic ammo drop chance that scales with floor difficulty & emergency low ammo
-                let lowAmmoBonus = player.ammo <= 5 ? 0.25 : 0;
-                let floorBonus = Math.min(0.15, player.floor * 0.005);
-                let ammoDropChance = (0.22 + 0.38 * (1 - Math.max(0, Math.min(15, player.ammo)) / 15)) * 0.8 + lowAmmoBonus + floorBonus;
+                // Dynamic Enemy Drops: Health drop chance increases as player HP decreases
+                let healthDropChance = (0.08 + 0.20 * (1 - Math.max(0, Math.min(100, player.hp)) / 100)) * 0.5;
+
+                // Tiered ammo drop rate: high chance when ammo is low, strict throttling when ammo is surplus
+                let ammoDropChance = 0.08;
+                if (player.ammo <= 5) {
+                    ammoDropChance = 0.35; // Emergency ammo assistance
+                } else if (player.ammo <= 12) {
+                    ammoDropChance = 0.18; // Low ammo support
+                } else if (player.ammo <= 25) {
+                    ammoDropChance = 0.08; // Normal baseline
+                } else if (player.ammo <= 40) {
+                    ammoDropChance = 0.03; // Surplus throttling
+                } else {
+                    ammoDropChance = 0.005; // Prevent hoarding (>40 ammo)
+                }
+
                 let dropRand = Math.random();
                 if (dropRand < healthDropChance) {
                     pickups.push({
@@ -736,8 +835,9 @@
             player.floor++;
             player.kills = 0;
 
-            // Airlock Sector Resupply Bonus (scales with higher floor kill requirements)
-            let resupply = Math.min(35, 15 + Math.floor((player.floor - 1) * 0.75));
+            // Airlock Sector Resupply Bonus (capped so player cannot hoard excess ammo)
+            let baseResupply = 8 + Math.min(7, Math.floor((player.floor - 1) * 0.3));
+            let resupply = player.ammo >= 35 ? Math.max(0, 40 - player.ammo) : baseResupply;
             player.ammo += resupply;
 
             floorEl.innerText = player.floor;
@@ -761,7 +861,8 @@
             const progressFill = document.getElementById('progressFill');
 
             transTitle.innerText = `FLOOR ${player.floor - 1} SECURED`;
-            transDesc.innerText = `AIRLOCK RESUPPLY: +${resupply} AMMO | ENTERING SECTOR ${player.floor}...`;
+            let resupplyText = resupply > 0 ? `AIRLOCK RESUPPLY: +${resupply} AMMO` : `AIRLOCK RESUPPLY: STORES FULL`;
+            transDesc.innerText = `${resupplyText} | ENTERING SECTOR ${player.floor}...`;
             transOverlay.style.display = 'block';
 
             progressFill.style.width = '0%';
@@ -788,7 +889,7 @@
         }
 
         function update(dt) {
-            if (inTransition) return;
+            if (inTransition || isPaused) return;
             updateDijkstraMap();
 
             // Auto/rapid fire when holding mouse click
@@ -971,6 +1072,9 @@
                         playHitSound();
                         hitFlash = 5;
                         if (player.hp <= 0) {
+                            isPaused = false;
+                            const pauseOverlay = document.getElementById('pauseOverlay');
+                            if (pauseOverlay) pauseOverlay.style.display = 'none';
                             overlay.style.display = 'block';
                             document.getElementById('title').innerText = "SYSTEM FAILURE";
                             document.getElementById('desc').innerText = "BIOLOGICAL SIGNATURE TERMINATED";
@@ -987,7 +1091,7 @@
                         hpEl.innerText = Math.ceil(player.hp);
                         playPickupSound(true);
                     } else {
-                        let ammoAmount = 8 + Math.floor(Math.random() * 7) + Math.min(10, Math.floor(player.floor / 3));
+                        let ammoAmount = 5 + Math.floor(Math.random() * 4); // Grants 5 to 8 ammo
                         player.ammo += ammoAmount;
                         ammoEl.innerText = player.ammo;
                         playPickupSound(false);
@@ -1222,8 +1326,18 @@
             resetGame();
         });
 
+        const resumeBtn = document.getElementById('resumeBtn');
+        if (resumeBtn) {
+            resumeBtn.addEventListener('click', () => {
+                resumeGame();
+            });
+        }
+
         function resetGame() {
             inTransition = false;
+            isPaused = false;
+            const pauseOverlay = document.getElementById('pauseOverlay');
+            if (pauseOverlay) pauseOverlay.style.display = 'none';
             lastPlayerGridX = -1;
             lastPlayerGridY = -1;
             lastLoopTime = performance.now();
