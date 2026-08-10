@@ -665,10 +665,12 @@
                 player.kills++;
                 killsEl.innerText = player.kills;
 
-                // Dynamic Enemy Drops: Health/Ammo drop chance increases the closer to zero player's resources are (health halved)
+                // Dynamic Enemy Drops: Health/Ammo drop chance increases the closer to zero player's resources are
                 let healthDropChance = (0.08 + 0.32 * (1 - Math.max(0, Math.min(100, player.hp)) / 100)) * 0.5;
-                // Decreased by 45% (retains 55% of original rate)
-                let ammoDropChance = (0.18 + 0.32 * (1 - Math.max(0, Math.min(10, player.ammo)) / 10)) * 0.55;
+                // Enhanced dynamic ammo drop chance that scales with floor difficulty & emergency low ammo
+                let lowAmmoBonus = player.ammo <= 5 ? 0.25 : 0;
+                let floorBonus = Math.min(0.15, player.floor * 0.005);
+                let ammoDropChance = (0.22 + 0.38 * (1 - Math.max(0, Math.min(15, player.ammo)) / 15)) * 0.8 + lowAmmoBonus + floorBonus;
                 let dropRand = Math.random();
                 if (dropRand < healthDropChance) {
                     pickups.push({
@@ -734,8 +736,13 @@
             player.floor++;
             player.kills = 0;
 
+            // Airlock Sector Resupply Bonus (scales with higher floor kill requirements)
+            let resupply = Math.min(35, 15 + Math.floor((player.floor - 1) * 0.75));
+            player.ammo += resupply;
+
             floorEl.innerText = player.floor;
             killsEl.innerText = player.kills;
+            ammoEl.innerText = player.ammo;
             targetKillsEl.innerText = getTargetKills();
 
             MAP = generateProceduralMap();
@@ -754,7 +761,7 @@
             const progressFill = document.getElementById('progressFill');
 
             transTitle.innerText = `FLOOR ${player.floor - 1} SECURED`;
-            transDesc.innerText = `DECOMPRESSING AIRLOCK TO SECTOR ${player.floor}...`;
+            transDesc.innerText = `AIRLOCK RESUPPLY: +${resupply} AMMO | ENTERING SECTOR ${player.floor}...`;
             transOverlay.style.display = 'block';
 
             progressFill.style.width = '0%';
@@ -980,7 +987,8 @@
                         hpEl.innerText = Math.ceil(player.hp);
                         playPickupSound(true);
                     } else {
-                        player.ammo += 5 + Math.floor(Math.random() * 6);
+                        let ammoAmount = 8 + Math.floor(Math.random() * 7) + Math.min(10, Math.floor(player.floor / 3));
+                        player.ammo += ammoAmount;
                         ammoEl.innerText = player.ammo;
                         playPickupSound(false);
                     }
